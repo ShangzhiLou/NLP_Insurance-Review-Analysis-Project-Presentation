@@ -12,6 +12,7 @@ from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 import joblib
 import matplotlib.pyplot as plt
+import shap
 from openai import OpenAI
 
 # Load cleaned data
@@ -78,6 +79,72 @@ def llm_classification(text):
     )
     return response.choices[0].message.content
 
+def explain_tfidf_model(model, X_test):
+    """Explain TF-IDF model using SHAP"""
+    explainer = shap.LinearExplainer(model.named_steps['clf'], 
+                                   model.named_steps['tfidf'].transform(X_test))
+    shap_values = explainer.shap_values(model.named_steps['tfidf'].transform(X_test))
+    
+    # Visualize explanations
+    shap.summary_plot(shap_values, 
+                     model.named_steps['tfidf'].transform(X_test),
+                     feature_names=model.named_steps['tfidf'].get_feature_names_out(),
+                     show=False)
+    plt.savefig('visualizations/tfidf_shap_summary.png')
+    plt.close()
+
+def explain_lstm_model(model, tokenizer, X_test, max_len=100):
+    """Explain LSTM model using SHAP"""
+    try:
+        # Prepare test data
+        X_test_seq = tokenizer.texts_to_sequences(X_test)
+        X_test_pad = pad_sequences(X_test_seq, maxlen=max_len)
+        
+        # Create background data
+        background = X_test_pad[np.random.choice(X_test_pad.shape[0], 100, replace=False)]
+        
+        # Create SHAP explainer
+        explainer = shap.DeepExplainer(model, background)
+        
+        # Get SHAP values for first 10 samples
+        shap_values = explainer.shap_values(X_test_pad[:10])
+        
+        # Visualize explanations
+        if isinstance(shap_values, list):
+            shap_values = shap_values[0]  # Take first output if multiple
+            
+        plt.figure()
+        shap.summary_plot(shap_values, 
+                         X_test_pad[:10],
+                         feature_names=list(tokenizer.index_word.values()),
+                         show=False)
+        plt.savefig('visualizations/lstm_shap_summary.png')
+        plt.close()
+        
+    except Exception as e:
+        print(f"Error explaining LSTM model: {str(e)}")
+        print("Falling back to simpler SHAP explainer")
+        
+        # Try KernelExplainer as fallback
+        try:
+            def predict_wrapper(x):
+                return model.predict(pad_sequences(x, maxlen=max_len))
+                
+            explainer = shap.KernelExplainer(predict_wrapper, 
+                                           np.zeros((1, max_len)))
+            shap_values = explainer.shap_values(X_test_pad[:10])
+            
+            plt.figure()
+            shap.summary_plot(shap_values, 
+                             X_test_pad[:10],
+                             feature_names=list(tokenizer.index_word.values()),
+                             show=False)
+            plt.savefig('visualizations/lstm_shap_summary.png')
+            plt.close()
+            
+        except Exception as e2:
+            print(f"Fallback explanation failed: {str(e2)}")
+
 # Main function
 def main():
     # Load and preprocess data
@@ -99,12 +166,20 @@ def main():
     print("TF-IDF Model Results:")
     print(classification_report(y_test, y_pred))
     
+    # Explain TF-IDF model
+    print("\nExplaining TF-IDF model with SHAP...")
+    explain_tfidf_model(tfidf_model, X_test)
+    
     # Save TF-IDF model
     joblib.dump(tfidf_model, 'tfidf_model.pkl')
     
     # Train LSTM model
     print("\nTraining LSTM model...")
     lstm_model, tokenizer, history = train_lstm_model(X_train, y_train)
+    
+    # Explain LSTM model
+    print("\nExplaining LSTM model with SHAP...")
+    explain_lstm_model(lstm_model, tokenizer, X_test)
     
     # Save LSTM model
     lstm_model.save('lstm_model.h5')
